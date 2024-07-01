@@ -219,6 +219,21 @@ impl Rgb<u8> {
         Self::from_u32(0xFF0000)
     }
 
+    /// Returns an orange RGB color.
+    pub const fn orange() -> Self {
+        Self::from_u32(0xFFA500)
+    }
+
+    /// Returns a violet RGB color.
+    pub const fn violet() -> Self {
+        Self::from_u32(0x7F00FF)
+    }
+
+    /// Returns a turquoise color.
+    pub const fn turquoise() -> Self {
+        Self::from_u32(0x40E0D0)
+    }
+
     /// Returns a pure green RGB color.
     pub const fn green() -> Self {
         Self::from_u32(0x00FF00)
@@ -229,15 +244,15 @@ impl Rgb<u8> {
         Self::from_u32(0x0000FF)
     }
 
-    /// Returns a pure yellow RGB color.
+    /// Returns a yellow (red + green) RGB color.
     pub const fn yellow() -> Self {
         Self::from_u32(0xFFFF00)
     }
-    /// Returns a pure magenta RGB color.
+    /// Returns a magenta (red + blue) RGB color.
     pub const fn magenta() -> Self {
         Self::from_u32(0xFF00FF)
     }
-    /// Returns a pure cyan RGB color.
+    /// Returns a cyan (green + blue) RGB color.
     pub const fn cyan() -> Self {
         Self::from_u32(0x00FFFF)
     }
@@ -248,6 +263,35 @@ impl Rgb<u8> {
     /// Returns a pure black RGB color.
     pub const fn black() -> Self {
         Self::from_u32(0x000000)
+    }
+}
+
+impl FromStr for Rgb<u8> {
+    type Err = super::NoSuchColor;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "red" | "Red" => Ok(Self::red()),
+            "green" | "Green" => Ok(Self::green()),
+            "blue" | "Blue" => Ok(Self::blue()),
+            "yellow" | "Yellow" => Ok(Self::yellow()),
+            "magenta" | "Magenta" => Ok(Self::magenta()),
+            "cyan" | "Cyan" => Ok(Self::cyan()),
+            "white" | "White" => Ok(Self::white()),
+            "black" | "Black" => Ok(Self::black()),
+            s => {
+                // Remove `#` or `0x` prefix
+                let s = s
+                    .strip_prefix('#')
+                    .or_else(|| s.strip_prefix("0x"))
+                    .unwrap_or(s);
+                if let Some(rgb) = parse_hex(s) {
+                    Ok(rgb)
+                } else {
+                    Err(super::NoSuchColor)
+                }
+            }
+        }
     }
 }
 
@@ -391,11 +435,11 @@ impl FromStr for Color {
 /// Optionally prefixed with `#` or `0x`.
 fn parse_hex_color(value: &str) -> Option<Color> {
     if let Some(value) = value.strip_prefix('#') {
-        parse_hex(value)
+        parse_hex(value).map(Color::from)
     } else if let Some(value) = value.strip_prefix("0x") {
-        parse_hex(value)
+        parse_hex(value).map(Color::from)
     } else if value.len() == 6 {
-        parse_hex(value)
+        parse_hex(value).map(Color::from)
     } else if value.len() == 3 {
         // RGB values between 0 and 5 maybe?
         // Like 050 for green
@@ -413,7 +457,7 @@ fn parse_hex_color(value: &str) -> Option<Color> {
 }
 
 /// This parses a purely hex string (either rrggbb or rgb) into a color.
-fn parse_hex(value: &str) -> Option<Color> {
+fn parse_hex(value: &str) -> Option<Rgb<u8>> {
     // Compute per-color length, and amplitude
     let (l, multiplier) = match value.len() {
         6 => (2, 1),
@@ -424,7 +468,7 @@ fn parse_hex(value: &str) -> Option<Color> {
     let g = load_hex(&value[l..2 * l]) * multiplier;
     let b = load_hex(&value[2 * l..3 * l]) * multiplier;
 
-    Some(Color::Rgb(r as u8, g as u8, b as u8))
+    Some(Rgb::new(r as u8, g as u8, b as u8))
 }
 
 /// Loads a hexadecimal code
