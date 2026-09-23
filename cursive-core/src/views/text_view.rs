@@ -136,6 +136,11 @@ impl TextContent {
     fn version(&self) -> u64 {
         self.content.lock().version
     }
+
+    // The length of the current content, in bytes.
+    fn len(&self) -> usize {
+        self.content.lock().content_value.source().len()
+    }
 }
 
 /// Internal representation of the content for a `TextView`.
@@ -528,13 +533,15 @@ impl View for TextView {
 
     fn required_size(&mut self, size: Vec2) -> Vec2 {
         let width = self.wrap_width(size);
-        self.update_snapshot();
         if width == 0 {
             // No room at all: we'd need at least one column, and at most one
             // row per byte (each row at width 1 holds at least one).
-            let len = self.snapshot.source().len();
+            // (Without updating the snapshot: `rows` must stay in sync with
+            // it, and there are none to compute here.)
+            let len = self.content.len();
             return Vec2::new(usize::from(len > 0), len);
         }
+        self.update_snapshot();
         if let Some(size) = self.known_size(width) {
             return size;
         }
@@ -569,6 +576,20 @@ mod tests {
     use super::TextView;
     use crate::Vec2;
     use crate::view::View;
+
+    #[test]
+    fn zero_width_keeps_rows_in_sync() {
+        // Rows must match the snapshot they were computed from (`draw` uses
+        // both): asking for width 0 after a change must not replace one
+        // without the other.
+        let mut view = TextView::new("first");
+        view.layout(Vec2::new(10, 5));
+        let rows_version = view.snapshot_version;
+
+        view.set_content("second, longer text");
+        assert_eq!(view.required_size(Vec2::new(0, 5)).x, 1);
+        assert_eq!(view.snapshot_version, rows_version);
+    }
 
     #[test]
     fn zero_width_needs_a_column() {
