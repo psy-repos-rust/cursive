@@ -578,6 +578,18 @@ mod tests {
     use crate::view::View;
 
     #[test]
+    fn size_cache_stays_bounded() {
+        let mut view = TextView::new("some text that wraps at many widths");
+        for i in 0..5000 {
+            view.required_size(Vec2::new(i % 300, 5));
+            if i % 7 == 0 {
+                view.layout(Vec2::new(i % 300, 5));
+            }
+            assert!(view.sizes.len() <= 8);
+        }
+    }
+
+    #[test]
     fn zero_width_keeps_rows_in_sync() {
         // Rows must match the snapshot they were computed from (`draw` uses
         // both): asking for width 0 after a change must not replace one

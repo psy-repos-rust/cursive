@@ -718,6 +718,18 @@ mod tests {
     }
 
     #[test]
+    fn size_cache_stays_bounded() {
+        let mut area = TextArea::new().content("some text\nthat wraps at many widths");
+        for i in 0..5000 {
+            area.required_size(Vec2::new(i % 300, 1 + i % 40));
+            if i % 7 == 0 {
+                area.layout(Vec2::new(i % 300, 1 + i % 40));
+            }
+            assert!(area.sizes.len() <= 8);
+        }
+    }
+
+    #[test]
     fn edits_match_fresh() {
         // Rows used to be patched incrementally on edits, which could drift
         // from what the full computation gives (and panic later). Type into
