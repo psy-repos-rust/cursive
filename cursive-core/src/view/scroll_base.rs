@@ -140,12 +140,13 @@ impl ScrollBase {
         // The min() is there to stop at the bottom of the content.
         // The saturating_sub is there to stop at the bottom of the content.
         // eprintln!("Scrolling to {}", thumb_y);
+        let hidden = self.content_height.saturating_sub(self.view_height);
         self.start_line = min(
             div_up(
-                (1 + self.content_height - self.view_height) * thumb_y,
-                self.view_height - thumb_height + 1,
+                (1 + hidden) * thumb_y,
+                (self.view_height + 1).saturating_sub(thumb_height).max(1),
             ),
-            self.content_height - self.view_height,
+            hidden,
         );
     }
 
@@ -160,6 +161,11 @@ impl ScrollBase {
 
     /// Starts scrolling from the given cursor position.
     pub fn start_drag(&mut self, position: Vec2, width: usize) -> bool {
+        // Nothing to drag when everything fits.
+        if !self.scrollable() {
+            return false;
+        }
+
         // First: are we on the correct column?
         let scrollbar_x = self.scrollbar_x(width);
         // eprintln!("Grabbed {} for {}", position.x, scrollbar_x);
@@ -191,6 +197,10 @@ impl ScrollBase {
         // eprintln!("Dragged: {:?}", position);
         // eprintln!("thumb: {:?}", self.thumb_grab);
         if let Some(grab) = self.thumb_grab {
+            if !self.scrollable() {
+                // The content shrank since the drag started.
+                return;
+            }
             let height = self.scrollbar_thumb_height();
             self.scroll_to_thumb(position.y.saturating_sub(grab), height);
         }
@@ -285,12 +295,15 @@ impl ScrollBase {
 
     /// Returns the height of the scrollbar thumb.
     pub fn scrollbar_thumb_height(&self) -> usize {
-        max(1, self.view_height * self.view_height / self.content_height)
+        max(
+            1,
+            self.view_height * self.view_height / self.content_height.max(1),
+        )
     }
 
     /// Returns the y position of the scrollbar thumb.
     pub fn scrollbar_thumb_y(&self, scrollbar_thumb_height: usize) -> usize {
-        let steps = self.view_height - scrollbar_thumb_height + 1;
-        steps * self.start_line / (1 + self.content_height - self.view_height)
+        let steps = (self.view_height + 1).saturating_sub(scrollbar_thumb_height);
+        steps * self.start_line / (1 + self.content_height.saturating_sub(self.view_height))
     }
 }
