@@ -10,6 +10,7 @@ use crate::{
     },
 };
 use log::debug;
+use parking_lot::Mutex;
 use std::cmp::min;
 use std::ops::Deref;
 
@@ -51,6 +52,11 @@ pub struct LinearLayout {
 
     // Changes whenever children are added, removed or accessed mutably.
     structure: u64,
+
+    // `layout_key()` for the layout pass it was computed during (pass, key):
+    // nothing changes during a pass, and computing it walks the whole
+    // subtree, which every ancestor would otherwise do again.
+    key_cache: Mutex<Option<(u64, u64)>>,
 }
 
 // How many sizes `memo` remembers.
@@ -168,6 +174,7 @@ impl LinearLayout {
             memo_key: 0,
             memo_pass: None,
             structure: fresh_layout_key(),
+            key_cache: Mutex::new(None),
         }
     }
 
@@ -661,10 +668,21 @@ impl View for LinearLayout {
     }
 
     fn layout_key(&self) -> u64 {
-        self.children.iter().fold(
+        let pass = current_pass();
+        if let (Some(pass), Some((cached_pass, key))) = (pass, *self.key_cache.lock())
+            && cached_pass == pass
+        {
+            return key;
+        }
+
+        let key = self.children.iter().fold(
             combine_layout_key(self.structure, &self.orientation),
             |key, child| combine_layout_key(key, &child.view.layout_key()),
-        )
+        );
+        if let Some(pass) = pass {
+            *self.key_cache.lock() = Some((pass, key));
+        }
+        key
     }
 
     fn required_size(&mut self, req: Vec2) -> Vec2 {
