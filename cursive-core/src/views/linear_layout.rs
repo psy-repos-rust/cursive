@@ -37,9 +37,11 @@ pub struct LinearLayout {
     // so remembering only the last one, nested layouts would redo the work
     // of their whole subtree at every level: exponential in depth.
     //
-    // Besides exact requests, sizes are reused for requests that still hold
-    // them, when they didn't use all the space they had (see `Memo::fits`):
-    // enlarging the terminal around content that fits then costs nothing.
+    // Only exact requests are reused. A size that didn't use all the space
+    // it had may still change with a different request: a child deep in the
+    // tree may have been compressed (hidden by a `ResizedView` capping its
+    // width, for instance), and some children react to the space they get
+    // (a scroll view needs a scrollbar, so more width, with less height).
     memo: Vec<Memo>,
     // The key `memo` is valid for.
     memo_key: u64,
@@ -59,49 +61,6 @@ struct Memo {
     req: Vec2,
     size: Vec2,
     children: Vec<Vec2>,
-    // For which other requests the result is valid (see `fits`).
-    reuse: Reuse,
-}
-
-// How a size was computed, which tells which other requests would give it.
-#[derive(Clone, Copy)]
-enum Reuse {
-    // Our ideal size fitted: children just got the request.
-    Fitted,
-    // Our ideal size had room on our main axis (not on the other one):
-    // children got their ideal length, whatever the other lengths were, and
-    // none used all the length it was offered, so a longer one wouldn't
-    // change them.
-    MainRoom { ideal: usize },
-    // We had to compress (or give up): the result depends on the whole
-    // request, even where it is smaller (a child may need a scrollbar, so
-    // more width, with less height).
-    Exact,
-}
-
-impl Memo {
-    // Would `req` give the same result?
-    fn fits(&self, req: Vec2, orientation: direction::Orientation) -> bool {
-        // For the same request, or for any request that still holds the
-        // size when it was smaller than the request it came from.
-        //
-        // Unlike `SizeCache`, this remembers the original request: a size
-        // that overflowed (larger than its request) says nothing about what
-        // a request of exactly that size would give.
-        let axis = |original: usize, size: usize, req: usize| {
-            req == original || (size < original && req >= size)
-        };
-        match self.reuse {
-            Reuse::Fitted => {
-                axis(self.req.x, self.size.x, req.x) && axis(self.req.y, self.size.y, req.y)
-            }
-            Reuse::MainRoom { ideal } => {
-                req.get(orientation.swap()) == self.req.get(orientation.swap())
-                    && *req.get(orientation) >= ideal
-            }
-            Reuse::Exact => false,
-        }
-    }
 }
 
 struct Child {
@@ -514,9 +473,7 @@ impl LinearLayout {
     }
 
     // The actual size negotiation, without any caching.
-    //
-    // Also returns which other requests the result is valid for.
-    fn compute_required_size(&mut self, req: Vec2) -> (Vec2, Reuse) {
+    fn compute_required_size(&mut self, req: Vec2) -> Vec2 {
         debug!("Req: {:?}", req);
 
         // First, make a naive scenario: everything will work fine.
@@ -532,7 +489,7 @@ impl LinearLayout {
         // Does it fit?
         if ideal.fits_in(req) {
             // Champagne!
-            return (ideal, Reuse::Fitted);
+            return ideal;
         }
 
         // Ok, so maybe it didn't. Budget cuts, everyone.
@@ -591,7 +548,7 @@ impl LinearLayout {
 
             // TODO: print some error message or something
             debug!("Seriously? {:?} > {:?}???", desperate, req);
-            return (desperate, Reuse::Exact);
+            return desperate;
         }
 
         // So now that we know we _can_ make it all fit, we can redistribute
@@ -656,16 +613,7 @@ impl LinearLayout {
         debug!("Final sizes2: {:?}", final_sizes);
 
         // Let's stack everything to see what it looks like.
-        // Strictly: a child that used all of its length (the whole request)
-        // might want more with a larger request.
-        let reuse = if ideal.get(orientation) < req.get(orientation) {
-            Reuse::MainRoom {
-                ideal: *ideal.get(orientation),
-            }
-        } else {
-            Reuse::Exact
-        };
-        (self.orientation.stack(final_sizes.iter().copied()), reuse)
+        self.orientation.stack(final_sizes.iter().copied())
     }
 }
 
@@ -724,11 +672,7 @@ impl View for LinearLayout {
             // Did anything change since last time?
             self.validate_caches();
 
-            let memo = self.memo.iter().find(|memo| memo.req == req);
-            if let Some(memo) = memo.or_else(|| {
-                let orientation = self.orientation;
-                self.memo.iter().find(|memo| memo.fits(req, orientation))
-            }) {
+            if let Some(memo) = self.memo.iter().find(|memo| memo.req == req) {
                 // Restore what `layout()` will rely on.
                 for (child, &size) in self.children.iter_mut().zip(&memo.children) {
                     child.required_size = size;
@@ -736,7 +680,7 @@ impl View for LinearLayout {
                 return memo.size;
             }
 
-            let (size, reuse) = self.compute_required_size(req);
+            let size = self.compute_required_size(req);
             if self.memo.len() == MEMO_CAP {
                 self.memo.remove(0);
             }
@@ -744,7 +688,6 @@ impl View for LinearLayout {
                 req,
                 size,
                 children: self.children.iter().map(|c| c.required_size).collect(),
-                reuse,
             });
             size
         })
@@ -978,6 +921,25 @@ mod tests {
             tree.layout(size);
             let layout = calls.load(Ordering::Relaxed);
             assert!(layout <= 4 * depth, "{name}: {layout} leaf calls in layout");
+        }
+    }
+
+    #[test]
+    fn memo_stays_bounded() {
+        // Resizing the terminal gives a new size every frame: the memo must
+        // not keep them all.
+        let mut layout = LinearLayout::vertical()
+            .child(TextView::new("some text that wraps"))
+            .child(
+                LinearLayout::horizontal()
+                    .child(TextView::new("a b"))
+                    .child(TextView::new("c")),
+            );
+        for i in 0..5000 {
+            let size = Vec2::new(1 + i % 97, 1 + i % 53);
+            layout.layout(size);
+            layout.required_size(size + (i % 3, i % 5));
+            assert!(layout.memo.len() <= super::MEMO_CAP);
         }
     }
 
