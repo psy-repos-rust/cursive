@@ -1052,7 +1052,9 @@ impl<T: 'static + Send + Sync> View for SelectView<T> {
                 regular_style
             };
 
-            for i in 0..self.len() {
+            // Only visible items need drawing (lists can be long).
+            let visible = printer.visible_range(crate::direction::Orientation::Vertical);
+            for i in visible.start..visible.end.min(self.len()) {
                 let style = if i == focus {
                     highlight_style
                 } else {

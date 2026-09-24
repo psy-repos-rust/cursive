@@ -633,8 +633,11 @@ fn try_focus(
 
 impl View for LinearLayout {
     fn draw(&self, printer: &Printer) {
+        // Only children at least partly visible need drawing (in a long
+        // scrolled list, most aren't).
+        let visible = printer.visible_range(self.orientation);
+
         // Use pre-computed sizes
-        // debug!("Pre loop!");
         for (i, item) in ChildIterator::new(
             self.children.iter(),
             self.orientation,
@@ -642,9 +645,12 @@ impl View for LinearLayout {
         )
         .enumerate()
         {
-            // debug!("Printer size: {:?}", printer.size);
-            // debug!("Child size: {:?}", item.child.required_size);
-            // debug!("Offset: {:?}", item.offset);
+            if item.offset >= visible.end {
+                break;
+            }
+            if item.length == 0 || item.offset + item.length <= visible.start {
+                continue;
+            }
             let printer = &printer
                 .offset(self.orientation.make_vec(item.offset, 0))
                 .cropped(item.child.last_size)

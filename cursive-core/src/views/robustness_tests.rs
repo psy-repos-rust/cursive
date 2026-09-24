@@ -375,3 +375,93 @@ fn containers_survive_erratic_children() {
         }
     }
 }
+
+/// What `view` (laid out at `full` size) draws in the `window`-sized area
+/// at `offset`, as seen through a scrolled printer (like `ScrollView` uses):
+/// the text of each cell, row by row.
+fn draw_window(view: &dyn View, full: Vec2, offset: Vec2, window: Vec2) -> Vec<Vec<String>> {
+    let theme = Theme::default();
+    let buffer = RwLock::new(PrintBuffer::new());
+    buffer.write().resize(window);
+    view.draw(
+        &Printer::new(window, &theme, &buffer)
+            .content_offset(offset)
+            .inner_size(full),
+    );
+    let buffer = buffer.read();
+    (0..window.y)
+        .map(|y| {
+            (0..window.x)
+                .map(|x| {
+                    let cell = buffer.cell_at(Vec2::new(x, y));
+                    cell.map_or("", |c| c.text()).to_string()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn scrolled_drawing_matches_full_drawing() {
+    // Containers skip drawing children that aren't visible: what is visible
+    // must be exactly what drawing everything shows there.
+    use crate::views::SelectView;
+
+    let mut vertical = LinearLayout::vertical();
+    let mut horizontal = LinearLayout::horizontal();
+    let mut list = ListView::new();
+    let mut select = SelectView::new();
+    for i in 0..200 {
+        vertical.add_child(
+            LinearLayout::horizontal()
+                .child(TextView::new(format!("row {i}")))
+                .child(TextView::new("a\nb")),
+        );
+        horizontal.add_child(TextView::new(format!("c{i}\nx")));
+        list.add_child(
+            format!("label {i}"),
+            TextView::new(format!("value {i}\nmore")),
+        );
+        select.add_item(format!("item {i}"), i);
+    }
+    select.set_selection(120);
+    let views: [(&str, BoxedView); 4] = [
+        ("vertical", BoxedView::boxed(vertical)),
+        ("horizontal", BoxedView::boxed(horizontal)),
+        ("list", BoxedView::boxed(list)),
+        ("select", BoxedView::boxed(select)),
+    ];
+
+    let window = Vec2::new(20, 10);
+    for (name, mut view) in views {
+        let full = view.required_size(Vec2::new(2000, 1000));
+        view.layout(full);
+        let reference = draw_window(&view, full, Vec2::zero(), full);
+        let offsets = [
+            (0, 0),
+            (0, 1),
+            (3, 57),
+            (0, 150),
+            (400, 2),
+            (full.x.saturating_sub(5), full.y.saturating_sub(3)),
+        ];
+        for offset in offsets {
+            let offset = Vec2::from(offset).or_min(full);
+            let expected: Vec<Vec<String>> = (0..window.y)
+                .map(|y| {
+                    (0..window.x)
+                        .map(|x| {
+                            reference
+                                .get(offset.y + y)
+                                .and_then(|row| row.get(offset.x + x))
+                                .cloned()
+                                .unwrap_or_default()
+                        })
+                        .collect()
+                })
+                .collect();
+            let got = draw_window(&view, full, offset, window);
+            assert_eq!(got, expected, "{name} at {offset:?}");
+        }
+    }
+}

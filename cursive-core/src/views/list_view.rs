@@ -381,8 +381,18 @@ impl View for ListView {
         let offset = self.labels_width() + 1;
         let mut y = 0;
 
+        // Only rows at least partly visible need drawing.
+        let visible = printer.visible_range(direction::Orientation::Vertical);
+
         debug!("Offset: {}", offset);
         for (i, (child, &height)) in self.children.iter().zip(&self.children_heights).enumerate() {
+            if y >= visible.end {
+                break;
+            }
+            if y + height <= visible.start {
+                y += height;
+                continue;
+            }
             match child {
                 ListChild::Row(label, view) => {
                     printer.print((0, y), label);

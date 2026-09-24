@@ -101,6 +101,19 @@ impl<'a, 'b> Printer<'a, 'b> {
         Rect::from_size(self.offset, self.output_size)
     }
 
+    /// The range of coordinates along `orientation` that would be visible,
+    /// in the view's own coordinates (empty if nothing is visible at all).
+    ///
+    /// Anything printed outside of it is discarded: containers can skip
+    /// drawing children entirely outside of it.
+    pub(crate) fn visible_range(&self, orientation: Orientation) -> std::ops::Range<usize> {
+        if self.output_size.x == 0 || self.output_size.y == 0 {
+            return 0..0;
+        }
+        let start = *self.content_offset.get(orientation);
+        start..start + *self.output_size.get(orientation)
+    }
+
     /// Returns the size of the entire buffer.
     ///
     /// This is the size of the entire terminal, not just the area this printer can write into.
