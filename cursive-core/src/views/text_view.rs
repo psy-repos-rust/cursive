@@ -45,11 +45,13 @@ impl TextContent {
         S: Into<StyledString>,
     {
         let content = Arc::new(content.into());
+        let version = fresh_layout_key();
 
         TextContent {
             content: Arc::new(Mutex::new(TextContentInner {
                 content_value: content,
-                version: fresh_layout_key(),
+                version,
+                replaced_version: version,
             })),
         }
     }
@@ -90,10 +92,11 @@ impl TextContent {
     where
         S: Into<StyledString>,
     {
-        self.with_content(|c| {
+        // Views sharing this content can then keep the rows they computed.
+        self.with_content_inner(true, |c| {
             // This will only clone content if content_cached and content_value
             // are sharing the same underlying Rc.
-            c.append(content);
+            Arc::make_mut(&mut c.content_value).append(content);
         })
     }
 
@@ -110,11 +113,11 @@ impl TextContent {
     where
         F: FnOnce(&mut StyledString) -> O,
     {
-        self.with_content_inner(|c| f(Arc::make_mut(&mut c.content_value)))
+        self.with_content_inner(false, |c| f(Arc::make_mut(&mut c.content_value)))
     }
 
     /// Apply the given closure to the inner content, and bump its version.
-    fn with_content_inner<F, O>(&self, f: F) -> O
+    fn with_content_inner<F, O>(&self, appended: bool, f: F) -> O
     where
         F: FnOnce(&mut TextContentInner) -> O,
     {
@@ -123,14 +126,22 @@ impl TextContent {
         let out = f(&mut content);
 
         content.version = fresh_layout_key();
+        if !appended {
+            content.replaced_version = content.version;
+        }
 
         out
     }
 
-    // The current content and its version.
-    fn snapshot(&self) -> (InnerContentType, u64) {
+    // The current content, its version, and the version of the last change
+    // that wasn't just appending to it.
+    fn snapshot(&self) -> (InnerContentType, u64, u64) {
         let content = self.content.lock();
-        (Arc::clone(&content.content_value), content.version)
+        (
+            Arc::clone(&content.content_value),
+            content.version,
+            content.replaced_version,
+        )
     }
 
     fn version(&self) -> u64 {
@@ -157,6 +168,10 @@ struct TextContentInner {
     // Several views can share this content: each keeps track of the version
     // it computed its rows from, rather than relying on a shared cache.
     version: u64,
+
+    // The version of the last change that wasn't just appending: content at
+    // any version since then is a prefix of the current one.
+    replaced_version: u64,
 }
 
 impl TextContentInner {
@@ -192,6 +207,9 @@ pub struct TextView {
 
     // The width `rows` were computed for (`usize::MAX` without wrapping).
     rows_width: Option<usize>,
+
+    // Whether some text was left out of `rows` (wider than a whole row).
+    truncated: bool,
 
     // `snapshot_version` at the last `layout()`.
     laid_out_version: Option<u64>,
@@ -275,6 +293,7 @@ impl TextView {
             snapshot_version: 0,
             rows: Vec::new(),
             rows_width: None,
+            truncated: false,
             laid_out_version: None,
             sizes: Vec::new(),
             wrap: true,
@@ -418,13 +437,48 @@ impl TextView {
     // Catches up with the shared content, dropping anything computed for
     // an older version.
     fn update_snapshot(&mut self) {
-        let (content, version) = self.content.snapshot();
+        let (content, version, replaced_version) = self.content.snapshot();
         if version != self.snapshot_version {
+            // If text was only appended since, most rows are still valid.
+            let appended = self.snapshot_version != 0 && self.snapshot_version >= replaced_version;
+            match self.rows_width {
+                Some(width) if appended && width > 0 && !self.truncated => {
+                    self.append_rows(&content, width);
+                }
+                _ => self.rows_width = None,
+            }
             self.snapshot = content;
             self.snapshot_version = version;
-            self.rows_width = None;
             self.sizes.clear();
         }
+    }
+
+    // Updates `rows` (computed for `self.snapshot` at `width`) for `content`,
+    // which is `self.snapshot` with some text appended.
+    //
+    // Rows of a line only depend on that line: only the last line of the
+    // snapshot (which may continue in `content`) and what follows need to be
+    // wrapped again.
+    fn append_rows(&mut self, content: &InnerContentType, width: usize) {
+        let (span, offset) = last_line_start(&self.snapshot);
+        let old_rows = LinesIterator::new_at(self.snapshot.as_ref(), width, span, offset).count();
+        self.rows.truncate(self.rows.len().saturating_sub(old_rows));
+
+        let mut lines = LinesIterator::new_at(content.as_ref(), width, span, offset);
+        self.rows.extend(lines.by_ref());
+        self.truncated = lines.is_truncated();
+        self.update_width(width);
+    }
+
+    // Sets `self.width` for `rows` computed at `width`.
+    fn update_width(&mut self, width: usize) {
+        self.width = if self.truncated || self.rows.iter().any(|row| row.is_wrapped) {
+            // If any rows are wrapped (or some text didn't even fit), then
+            // require the full width.
+            Some(width)
+        } else {
+            self.rows.iter().map(|row| row.width).max()
+        };
     }
 
     fn compute_rows(&mut self, size: Vec2) {
@@ -440,20 +494,14 @@ impl TextView {
             // Nothing fits.
             self.rows.clear();
             self.width = None;
+            self.truncated = false;
             return;
         }
 
         let mut lines = LinesIterator::new(self.snapshot.as_ref(), width);
         self.rows = lines.by_ref().collect();
-
-        // Desired width
-        self.width = if lines.is_truncated() || self.rows.iter().any(|row| row.is_wrapped) {
-            // If any rows are wrapped (or some text didn't even fit), then
-            // require the full width.
-            Some(width)
-        } else {
-            self.rows.iter().map(|row| row.width).max()
-        };
+        self.truncated = lines.is_truncated();
+        self.update_width(width);
 
         const SIZES_CAP: usize = 8;
         if self.sizes.len() == SIZES_CAP {
@@ -484,15 +532,36 @@ impl TextView {
     }
 }
 
+// Where the last line of `text` starts: (span, byte offset in that span).
+//
+// That's right after its last line break, skipping empty spans (as iterating
+// over the whole text would).
+fn last_line_start(text: &StyledString) -> (usize, usize) {
+    let spans = text.spans_raw();
+    let span_text = |i: usize| spans[i].content.resolve(text.source());
+
+    let Some((mut span, mut offset)) = (0..spans.len())
+        .rev()
+        .find_map(|i| span_text(i).rfind('\n').map(|pos| (i, pos + 1)))
+    else {
+        return (0, 0);
+    };
+    while span < spans.len() && offset >= span_text(span).len() {
+        span += 1;
+        offset = 0;
+    }
+    (span, offset)
+}
+
 // Is what was computed at width `computed` (using `used` of it) also what
 // `width` would give?
 //
 // For the same width, or when it didn't use all the width it had (so nothing
 // was wrapped) and `width` still holds it. Not when it used exactly all of
 // it: a trailing space may have been dropped without the row counting as
-// wrapped.
+// wrapped. Never for width 0 either, where nothing is shown at all.
 fn fits(computed: usize, used: usize, width: usize) -> bool {
-    computed == width || (used < computed && used <= width)
+    computed == width || (width > 0 && used < computed && used <= width)
 }
 
 impl View for TextView {
@@ -576,6 +645,77 @@ mod tests {
     use super::TextView;
     use crate::Vec2;
     use crate::view::View;
+
+    #[test]
+    fn appended_rows_match_fresh_rows() {
+        // Appending only wraps the last line again: after any sequence of
+        // appends (and replacements), rows must be what wrapping everything
+        // gives.
+        use crate::style::Effect;
+        use crate::utils::markup::StyledString;
+        use crate::views::TextContent;
+
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let pieces = [
+            "a",
+            "word ",
+            " leading",
+            "\n",
+            "\n\n",
+            "e\u{301}",
+            "中文",
+            "trailing  ",
+            "",
+            "longer text that wraps\n",
+            "\u{200b}",
+            "tab\tthere",
+            "x",
+        ];
+        let random_text = |rnd: &mut dyn FnMut(usize) -> usize| {
+            let mut text = StyledString::new();
+            for _ in 0..rnd(4) {
+                let piece = pieces[rnd(pieces.len())];
+                if rnd(3) == 0 {
+                    text.append_styled(piece, Effect::Bold);
+                } else {
+                    text.append_plain(piece);
+                }
+            }
+            text
+        };
+
+        for _ in 0..300 {
+            let content = TextContent::new(random_text(&mut rnd));
+            let mut view = TextView::new_with_content(content.clone());
+            for _ in 0..30 {
+                match rnd(8) {
+                    0 => content.set_content(random_text(&mut rnd)),
+                    1 | 2 => {}
+                    _ => content.append(random_text(&mut rnd)),
+                }
+                let size = Vec2::new(rnd(30), 5);
+                if rnd(2) == 0 {
+                    view.layout(size);
+                }
+                let mut fresh = TextView::new(content.get_content().clone());
+                assert_eq!(view.required_size(size), fresh.required_size(size));
+                view.layout(size);
+                fresh.layout(size);
+                assert_eq!(
+                    view.rows,
+                    fresh.rows,
+                    "{:?}",
+                    content.get_content().source()
+                );
+            }
+        }
+    }
 
     #[test]
     fn size_cache_stays_bounded() {

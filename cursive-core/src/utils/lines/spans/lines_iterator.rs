@@ -41,10 +41,17 @@ where
 {
     /// Creates a new iterator with the given content and width.
     pub fn new(source: S, width: usize) -> Self {
+        Self::new_at(source, width, 0, 0)
+    }
+
+    /// Creates a new iterator starting at the given byte `offset` of the
+    /// given span, which must be the start of a line (right after a line
+    /// break): it gives the same rows as a full iteration from there.
+    pub(crate) fn new_at(source: S, width: usize, span: usize, offset: usize) -> Self {
         let source = Rc::new(source);
         let chunk_source = source.clone();
         LinesIterator {
-            iter: ChunkIterator::new(chunk_source).peekable(),
+            iter: ChunkIterator::new_at(chunk_source, span, offset).peekable(),
             source,
             width,
             chunk_offset: ChunkPart::default(),

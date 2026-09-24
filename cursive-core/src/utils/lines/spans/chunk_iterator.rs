@@ -21,12 +21,12 @@ pub struct ChunkIterator<S> {
 }
 
 impl<S> ChunkIterator<S> {
-    /// Creates a new ChunkIterator on the given styled string.
-    pub fn new(source: Rc<S>) -> Self {
+    /// Starts at the given byte `offset` of the given span.
+    pub fn new_at(source: Rc<S>, span: usize, offset: usize) -> Self {
         ChunkIterator {
             source,
-            current_span: 0,
-            offset: 0,
+            current_span: span,
+            offset,
         }
     }
 }
