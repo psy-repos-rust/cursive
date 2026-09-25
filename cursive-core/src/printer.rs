@@ -80,7 +80,7 @@ impl<'a, 'b> Printer<'a, 'b> {
     #[doc(hidden)]
     pub fn new<T: Into<Vec2>>(size: T, theme: &'a Theme, buffer: &'b RwLock<PrintBuffer>) -> Self {
         let size = size.into();
-        Printer {
+        let mut printer = Printer {
             offset: Vec2::zero(),
             content_offset: Vec2::zero(),
             output_size: size,
@@ -93,12 +93,30 @@ impl<'a, 'b> Printer<'a, 'b> {
                 color: ColorPair::terminal_default(),
                 effects: EnumSet::empty(),
             }),
-        }
+        };
+        printer.clamp_output_to_buffer();
+        printer
     }
 
     /// Returns the region of the window where this printer can write.
     pub fn output_window(&self) -> Rect {
         Rect::from_size(self.offset, self.output_size)
+    }
+
+    /// Pulls the output window back inside the backend buffer.
+    ///
+    /// Prints outside the buffer are meaningless, so every time the offset
+    /// or the output size changes, the window is clamped to the buffer.
+    /// Only the output viewport is affected; the virtual [`Self::size`]
+    /// reported to the view is left untouched.
+    fn clamp_output_to_buffer(&mut self) {
+        let buffer_size = self.buffer.read().size();
+        // Clamp the origin into the buffer. A zero-size window sitting
+        // exactly on the buffer edge still fits (`fits_in` is inclusive).
+        self.offset = self.offset.or_min(buffer_size);
+        // Shrink the output so the window ends inside the buffer.
+        let end = (self.offset + self.output_size).or_min(buffer_size);
+        self.output_size = end.saturating_sub(self.offset);
     }
 
     /// The range of coordinates along `orientation` that would be visible,
@@ -647,6 +665,8 @@ impl<'a, 'b> Printer<'a, 'b> {
 
             s.output_size = s.output_size.saturating_sub(offset);
             s.size = s.size.saturating_sub(offset);
+
+            s.clamp_output_to_buffer();
         })
     }
 
@@ -693,6 +713,7 @@ impl<'a, 'b> Printer<'a, 'b> {
             let size = size.into();
             s.output_size = Vec2::min(s.output_size, size);
             s.size = Vec2::min(s.size, size);
+            s.clamp_output_to_buffer();
         })
     }
 
@@ -766,5 +787,84 @@ impl<'a, 'b> Printer<'a, 'b> {
         self.clone().with(|s| {
             s.size = size.into();
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::View;
+    use crate::views::FixedLayout;
+
+    /// A view that draws through `Printer::on_window`, like `GradientView`.
+    struct WindowUser;
+    impl crate::View for WindowUser {
+        fn draw(&self, printer: &Printer) {
+            printer.on_window(|_| {});
+        }
+    }
+
+    fn buffer_10x10() -> (Theme, RwLock<PrintBuffer>) {
+        let mut buffer = PrintBuffer::new();
+        buffer.resize(Vec2::new(10, 10));
+        (Theme::default(), RwLock::new(buffer))
+    }
+
+    #[test]
+    fn offset_beyond_buffer_is_clamped_into_buffer() {
+        let (theme, buffer) = buffer_10x10();
+        let printer = Printer::new((10, 10), &theme, &buffer);
+        // What a positioned container hands to a fully off-screen child.
+        let child = printer.offset((50, 50)).cropped((5, 5));
+        assert!(
+            child
+                .output_window()
+                .bottom_right()
+                .fits_in(Vec2::new(10, 10)),
+            "output window {:?} escapes the 10x10 buffer",
+            child.output_window()
+        );
+    }
+
+    #[test]
+    fn clamped_printer_runs_on_window_on_empty_viewport() {
+        let (theme, buffer) = buffer_10x10();
+        let printer = Printer::new((10, 10), &theme, &buffer);
+        let child = printer.offset((50, 50)).cropped((5, 5));
+        let mut called = false;
+        child.on_window(|window| {
+            called = true;
+            // The window collapses to a zero-size rect pinned on the
+            // buffer edge (its inclusive `size()` still reports the
+            // single pinned point).
+            assert_eq!(window.viewport(), Rect::from_size((10, 10), (0, 0)));
+        });
+        assert!(called, "closure should run on the clamped (empty) window");
+    }
+
+    #[test]
+    fn partially_visible_child_keeps_visible_part() {
+        let (theme, buffer) = buffer_10x10();
+        let printer = Printer::new((10, 10), &theme, &buffer);
+        let child = printer.offset((8, 8)).cropped((5, 5));
+        assert_eq!(child.output_window(), Rect::from_size((8, 8), (2, 2)));
+    }
+
+    #[test]
+    fn clamp_leaves_inner_size_alone() {
+        let (theme, buffer) = buffer_10x10();
+        let printer = Printer::new((10, 10), &theme, &buffer).inner_size((100, 100));
+        let child = printer.offset((50, 50));
+        // `offset` itself shrinks `size` by its long-standing rule (100-50);
+        // the buffer clamp must not touch it any further.
+        assert_eq!(child.size, Vec2::new(50, 50));
+    }
+
+    #[test]
+    fn offscreen_fixed_layout_child_does_not_panic() {
+        let (theme, buffer) = buffer_10x10();
+        let printer = Printer::new((10, 10), &theme, &buffer);
+        let layout = FixedLayout::new().child(Rect::from_size((50, 50), (5, 5)), WindowUser);
+        layout.draw(&printer);
     }
 }
